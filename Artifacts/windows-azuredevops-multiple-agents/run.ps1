@@ -11,7 +11,7 @@ Param
     [String]$PersonalAccessToken,
 
     [Parameter()]
-    [string]$AgentName = "",
+    [string]$AgentName,
 
     [Parameter()]
     [string]$AgentInstallLocation,
