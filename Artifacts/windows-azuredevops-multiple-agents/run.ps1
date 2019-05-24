@@ -11,7 +11,7 @@ Param
     [String]$PersonalAccessToken,
 
     [Parameter()]
-    [string]$AgentName="",
+    [string]$AgentName = "",
 
     [Parameter()]
     [string]$AgentInstallLocation,
@@ -107,7 +107,7 @@ try {
         $AgentName = $env:COMPUTERNAME
     }#>
     if (-not [string]::IsNullOrWhiteSpace($AgentNamePrefix)) {
-        if(![string]::IsNullOrEmpty($AgentName)){
+        if (![string]::IsNullOrEmpty($AgentName)) {
             $AgentName = "-$AgentName";
         }
         $AgentName = ("{0}{1}" -f $AgentNamePrefix, $AgentName)
@@ -189,8 +189,7 @@ try {
 	
         Write-Output "Extracting the zip file for the agent"
 
-        $destShellFolder = (new-object -com shell.application).namespace("$agentInstallationPath")
-        $destShellFolder.CopyHere((new-object -com shell.application).namespace("$agentTempFolderName\agent.zip").Items(), 16)
+        Expand-Archive -Path "$agentTempFolderName\agent.zip" -DestinationPath $destShellFolder
 
         # Removing the ZoneIdentifier from files downloaded from the internet so the plugins can be loaded
         # Don't recurse down _work or _diag, those files are not blocked and cause the process to take much longer
