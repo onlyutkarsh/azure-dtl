@@ -189,7 +189,7 @@ try {
 	
         Write-Output "Extracting the zip file for the agent"
 
-        Expand-Archive -Path "$agentTempFolderName\agent.zip" -DestinationPath $destShellFolder
+        Expand-Archive -Path "$agentTempFolderName\agent.zip" -DestinationPath $agentInstallationPath
 
         # Removing the ZoneIdentifier from files downloaded from the internet so the plugins can be loaded
         # Don't recurse down _work or _diag, those files are not blocked and cause the process to take much longer

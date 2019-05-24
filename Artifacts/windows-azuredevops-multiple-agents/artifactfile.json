@@ -2,7 +2,7 @@
     "$schema": "https://raw.githubusercontent.com/Azure/azure-devtestlab/master/schemas/2016-11-28/dtlArtifacts.json",
     "title": "Azure Pipelines Agent(s)",
     "publisher": "Utkarsh Shigihalli",
-    "description": "Downloads latest Azure Pipelines agent for the account, and installs the specified number instances of the agents inside one Windows VM. Registers the agent with the Azure DevOps account, and adds agents to the specified agent pool. Note - If the specified agent folder already exists it will be overwritten.",
+    "description": "Downloads latest Azure Pipelines agent for the account, and installs the specified number instances of the agents inside one Windows VM. Registers the agent with the Azure DevOps organization, and adds agents to the specified agent pool. Note - If the overwrite flag is set to true and if the specified agent folder already exists it will be overwritten. If the location has already has a installed agents as a service, the artifact installation will fail.",
     "tags": [
         "Azure DevOps",
         "Pipelines",
@@ -28,7 +28,8 @@
             "type": "string",
             "displayName": "Agent Name",
             "description": "The name to give to the agent, as seen by Azure DevOps. If empty, the computer name will be used.",
-            "allowEmpty": true
+            "allowEmpty": true,
+            "defaultValue": ""
         },
         "AgentNamePrefix": {
             "type": "string",
@@ -61,6 +62,6 @@
         }
     },
     "runCommand": {
-        "commandToExecute": "[concat('powershell.exe -ExecutionPolicy bypass \"& ./run.ps1',' -Account ', parameters('Account'), ' -PersonalAccessToken ', parameters('PersonalAccessToken'), '-AgentInstallLocation ''', parameters('AgentInstallLocation'), ''' -AgentName ''', parameters('AgentName'), ''' -AgentNamePrefix ''', parameters('AgentNamePrefix'), ''' -PoolName ''', parameters('PoolName'), ''' -AgentCount ''', parameters('AgentCount'), '''\"')]"
+        "commandToExecute": "[concat('powershell.exe -ExecutionPolicy bypass \"& ./run.ps1',' -Account ', parameters('Account'), ' -PersonalAccessToken ', parameters('PersonalAccessToken'), '-AgentInstallLocation ''', parameters('AgentInstallLocation'), '-Overwrite ''', parameters('Overwrite'), ''' -AgentName ''', parameters('AgentName'), ''' -AgentNamePrefix ''', parameters('AgentNamePrefix'), ''' -PoolName ''', parameters('PoolName'), ''' -AgentCount ''', parameters('AgentCount'), '''\"')]"
     }
 }
