@@ -4,29 +4,16 @@
 [CmdletBinding()]
 Param
 (
-    [Parameter()]
     [string]$Account,
-
-    [Parameter()]
-    [String]$PersonalAccessToken,
-
-    [Parameter()]
+    [string]$PersonalAccessToken,
     [string]$AgentName,
-
-    [Parameter()]
     [string]$AgentInstallLocation,
-
-    [Parameter()]
-    [string]$AgentNamePrefix,
-
-    [Parameter()]
     [string]$PoolName,
-
-    [Parameter()]
     [int] $AgentCount,
-
-    [Parameter()]
-    [bool] $Overwrite
+    [bool] $Overwrite = $false,
+    [string] $WindowsLogonAccount,
+    [string] $WindowsLogonPassword,
+    [bool] $runAsAutoLogon
 )
 
 ###################################################################################################
@@ -38,21 +25,45 @@ Param
 #       This is necessary to ensure we capture errors inside the try-catch-finally block.
 $ErrorActionPreference = "Stop"
 
-# Ensure we set the working directory to that of the script.
-Push-Location $PSScriptRoot
+# Suppress progress bar output.
+$ProgressPreference = 'SilentlyContinue'
+
+# Ensure we force use of TLS 1.2 for all downloads.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# Configure strict debugging.
+Set-PSDebug -Strict
+
+# if the agentName is empty, use %COMPUTERNAME% as the value
+if ([String]::IsNullOrWhiteSpace($agentName)) {
+    $agentName = $env:COMPUTERNAME
+}
+
+# if the AgentInstallLocation is empty, use c:\agents as the value
+if ([string]::IsNullOrWhiteSpace($AgentInstallLocation)) {
+    $AgentInstallLocation = "c:\agents";
+}
+
+if ($AgentCount -le 0) {
+    $AgentCount = 1;
+}
+
 
 ###################################################################################################
 #
 # Handle all errors in this script.
 #
+
 trap {
     # NOTE: This trap will handle all errors. There should be no need to use a catch below in this
     #       script, unless you want to ignore a specific error.
-    $message = $error[0].Exception.Message
+    $message = $Error[0].Exception.Message
     if ($message) {
-        Write-Host -Object "ERROR: $message" -ForegroundColor Red
+        Write-Host -Object "`nERROR: $message" -ForegroundColor Red
     }
-    
+
+    Write-Host "`nThe artifact failed to apply.`n"
+
     # IMPORTANT NOTE: Throwing a terminating error (using $ErrorActionPreference = "Stop") still
     # returns exit code zero from the PowerShell script when using -File. The workaround is to
     # NOT use -File when calling this script and leverage the try-catch-finally block and return
@@ -60,39 +71,18 @@ trap {
     exit -1
 }
 
-#
-# Test the last exit code correctly.
-#
-function Test-LastExitCode {
-    param
-    (
-        [string] $Message = ''
-    )
-
-    # Whenever we execute commands such as '& somecommand' or via Invoke-Expression, we should always
-    # check the exit code, so we can decide to stop processing at that time, by throwing an exception.
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -and $exitCode -ne 0) {
-        if ($Message) {
-            if (-not $Message.EndsWith('.')) {
-                $Message += '.'
-            }
-            $Message += ' '
-        }
-        $Message += "Last command exited with error code $exitCode"
-        throw $Message
-    }
-    Write-Output "Completed with exit code: $exitCode"
-}
 ###################################################################################################
 #
-# Main execution block.
+# Functions
 #
-try {
-    Write-Output "Entering powershell task" 
-    Write-Output "Current folder: $PSScriptRoot" 
 
-    Write-Output "Validating parameters..."
+function Test-Parameters {
+    [CmdletBinding()]
+    param(
+        [string] $Account,
+        [string] $PersonalAccessToken,
+        [string] $PoolName
+    )
 
     if ([string]::IsNullOrWhiteSpace($Account)) {
         throw "Account parameter is required."
@@ -103,116 +93,351 @@ try {
     if ([string]::IsNullOrWhiteSpace($PoolName)) {
         throw "PoolName parameter is required."
     }
-    <#if ([string]::IsNullOrWhiteSpace($AgentName)) {
-        $AgentName = $env:COMPUTERNAME
-    }#>
-    if (-not [string]::IsNullOrWhiteSpace($AgentNamePrefix)) {
-        if (![string]::IsNullOrEmpty($AgentName)) {
-            $AgentName = "-$AgentName";
-        }
-        $AgentName = ("{0}{1}" -f $AgentNamePrefix, $AgentName)
+}
+
+function Test-ValidPath {
+    param(
+        [string] $Path
+    )
+
+    $isValid = Test-Path -Path $Path -IsValid -PathType Container
+
+    try {
+        [IO.Path]::GetFullPath($Path) | Out-Null
     }
-    if ([string]::IsNullOrWhiteSpace($AgentInstallLocation)) {
-        $AgentInstallLocation = "c:\agents";
+    catch {
+        $isValid = $false
     }
 
-    #Create a temporary directory where to download from Azure DevOps the agent package (vsts-agent.zip) and then launch the configuration.
+    return $isValid
+}
+
+function Test-AgentExists {
+    [CmdletBinding()]
+    param(
+        [string] $InstallPath,
+        [string] $AgentName
+    )
+
+    $agentConfigFile = Join-Path $InstallPath '.agent'
+
+    if (Test-Path $agentConfigFile) {
+        return $true
+    }
+    return $false
+}
+
+function Get-AgentPackage {
+    [CmdletBinding()]
+    param(
+        [string] $VstsAccount,
+        [string] $VstsUserPassword
+    )
+
+    # Create a temporary directory where to download from VSTS the agent package (agent.zip).
     $agentTempFolderName = Join-Path $env:temp ([System.IO.Path]::GetRandomFileName())
-    New-Item -ItemType Directory -Force -Path $agentTempFolderName
-    Write-Output "Temporary Agent download folder: $agentTempFolderName" 
+    New-Item -ItemType Directory -Force -Path $agentTempFolderName | Out-Null
 
-    $serverUrl = "https://dev.azure.com/$Account"
-    Write-Output "Server URL: $serverUrl" 
+    $agentPackagePath = "$agentTempFolderName\agent.zip"
+    $serverUrl = "https://$VstsAccount.visualstudio.com"
+    $vstsAgentUrl = "$serverUrl/_apis/distributedtask/packages/agent/win7-x64?`$top=1&api-version=3.0"
+    $vstsUser = "AzureDevTestLabs"
 
-    $retryCount = 3
-    $retries = 1
-    Write-Output "Downloading Agent install files" 
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $maxRetries = 3
+    $retries = 0
     do {
         try {
-            Write-Output "Fetching download URL for latest Azure DevOps agent..."
-            $vstsAgentUrl = "$serverUrl/_apis/distributedtask/packages/agent/win7-x64?`$top=1&api-version=3.0"
-            $basicAuth = (":{0}" -f $PersonalAccessToken)
+            $basicAuth = ("{0}:{1}" -f $vstsUser, $vstsUserPassword)
             $basicAuth = [System.Text.Encoding]::UTF8.GetBytes($basicAuth)
             $basicAuth = [System.Convert]::ToBase64String($basicAuth)
             $headers = @{ Authorization = ("Basic {0}" -f $basicAuth) }
-            [array] $agentList = Invoke-WebRequest -Uri $vstsAgentUrl -Headers $headers -Method Get -ContentType application/json -UseBasicParsing | ConvertFrom-Json
-            $agent = $agentList.value[0]
-           
-            Write-Output "Agent will be downloaded to: '$agentTempFolderName'"
 
-            $agentPackagePath = "$agentTempFolderName\agent.zip"
-
-            if (Test-Path -Path $agentPackagePath) {
-                Write-Output "Directory $agentTempFolderName is not empty...Removing all contents..."
-                Remove-Item "$agentTempFolderName/*" -Force -Recurse
+            $agentList = Invoke-RestMethod -Uri $vstsAgentUrl -Headers $headers -Method Get -ContentType application/json
+            $agent = $agentList.value
+            if ($agent -is [Array]) {
+                $agent = $agentList.value[0]
             }
-
-            $downloadUrl = $agent.downloadUrl;
-
-            Write-Output "Downloading agent from: $downloadUrl"
-
-            Invoke-WebRequest -Uri $agent.downloadUrl -Headers $headers -Method Get -OutFile  "$agentPackagePath" -UseBasicParsing | Out-Null
-
-            Write-Output "Downloaded agent successfully on attempt $retries" 
+            Invoke-WebRequest -Uri $agent.downloadUrl -Headers $headers -Method Get -OutFile "$agentPackagePath" | Out-Null
             break
         }
         catch {
             $exceptionText = ($_ | Out-String).Trim()
-            Write-Output "Exception occured downloading agent: $exceptionText in try number $retries" 
-            $retries++
-            Start-Sleep -Seconds 30 
+                
+            if (++$retries -gt $maxRetries) {
+                throw "Failed to download agent due to $exceptionText"
+            }
+            
+            Start-Sleep -Seconds 1 
         }
-    } 
-    while ($retries -le $retryCount)
+    }
+    while ($retries -le $maxRetries)
 
-    for ($i = 1; $i -lt $AgentCount + 1; $i++) {
-        $Agent = ($AgentName + "-" + $i)
+    return $agentPackagePath
+}
 
 
-        # Construct the agent folder under the main (hardcoded) C: drive.
-        $agentInstallationPath = Join-Path $AgentInstallLocation $Agent
-
-        #Test if the directory already exist, which probably means agent also exists
-        if ((!$Overwrite) -and (Test-Path $agentInstallationPath)) {
-            Write-Output "Directory $agentInstallationPath not empty..Overwrite is set to 'false', skipping..."
-            continue;
-        }
-
+function New-AgentInstallPath {
+    [CmdletBinding()]
+    param(
+        [string] $RootDirectory,
+        [string] $AgentName
+    )
+    
+    [string] $agentInstallPath = $null
+    
+    try {
         # Create the directory for this agent.
-        New-Item -ItemType Directory -Force -Path $agentInstallationPath
+        $agentInstallPath = Join-Path -Path $RootDirectory -ChildPath $AgentName
+        New-Item -ItemType Directory -Force -Path $agentInstallPath | Out-Null
+    }
+    catch {
+        $agentInstallPath = $null
+        throw "Failed to create the agent directory at $installPathDir."
+    }
+    
+    return $agentInstallPath
+}
 
-        $agentInstallationPath = [IO.Path]::GetFullPath($agentInstallationPath) # Get absolute path
+function Get-AgentInstaller {
+    param(
+        [string] $InstallPath
+    )
 
-        # Set the current directory to the agent dedicated one previously created.
-        Push-Location -Path $agentInstallationPath
-	
-        Write-Output "Extracting the zip file for the agent"
+    $agentExePath = [System.IO.Path]::Combine($InstallPath, 'config.cmd')
 
-        Expand-Archive -Path "$agentTempFolderName\agent.zip" -DestinationPath $agentInstallationPath
+    if (![System.IO.File]::Exists($agentExePath)) {
+        throw "Agent installer file not found: $agentExePath"
+    }
+    
+    return $agentExePath
+}
 
-        # Removing the ZoneIdentifier from files downloaded from the internet so the plugins can be loaded
-        # Don't recurse down _work or _diag, those files are not blocked and cause the process to take much longer
-        Write-Output "Unblocking files" 
-        Get-ChildItem -Recurse -Path $agentInstallationPath | Unblock-File | out-null
-
-        # Retrieve the path to the config.cmd file.
-        $agentConfigPath = [System.IO.Path]::Combine($agentInstallationPath, 'config.cmd')
-        Write-Output "Agent Location = $agentConfigPath" 
-        if (![System.IO.File]::Exists($agentConfigPath)) {
-            throw "File not found: $agentConfigPath"
+function Extract-AgentPackage {
+    [CmdletBinding()]
+    param(
+        [string] $PackagePath,
+        [string] $Destination
+    )
+  
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($PackagePath)
+    foreach ($entry in $archive.Entries) {
+        $entryTargetFilePath = [System.IO.Path]::Combine($Destination, $entry.FullName)
+        $entryDir = [System.IO.Path]::GetDirectoryName($entryTargetFilePath)
+        
+        #Ensure the directory of the archive entry exists
+        if (!(Test-Path $entryDir )) {
+            New-Item -ItemType Directory -Path $entryDir | Out-Null 
         }
+        
+        #If the entry is not a directory entry, then extract entry
+        if (!$entryTargetFilePath.EndsWith("\")) {
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $entryTargetFilePath, $true);
+        }
+    }
+}
 
-        # Call the agent with the configure command and all the options (this creates the settings file) without prompting
-        # the user or blocking the cmd execution
-        Write-Output "Configuring agent '$($Agent)'" 		
-        .\config.cmd --unattended --url $serverUrl --auth PAT --token $PersonalAccessToken --pool $PoolName --agent $Agent --runasservice
-        Test-LastExitCode
+function Prep-MachineForAutologon {
+    param(
+        $Config
+    )
 
-        Pop-Location
+    if ([string]::IsNullOrWhiteSpace($Config.WindowsLogonPassword)) {
+        throw "Windows logon password was not provided. Please retry by providing a valid windows logon password to enable autologon."
     }
 
-    Write-Output "Exiting InstallVSTSAgent.ps1" 
+    # Create a PS session for the user to trigger the creation of the registry entries required for autologon
+    $computerName = "localhost"
+    $password = ConvertTo-SecureString $Config.WindowsLogonPassword -AsPlainText -Force
+
+    if ($Config.WindowsLogonAccount.Split("\").Count -eq 2) {
+        $domain = $Config.WindowsLogonAccount.Split("\")[0]
+        $userName = $Config.WindowsLogonAccount.Split('\')[1]
+    }
+    else {
+        $domain = $Env:ComputerName
+        $userName = $Config.WindowsLogonAccount
+    }
+
+    $credentials = New-Object System.Management.Automation.PSCredential("$domain\\$userName", $password)
+    Enter-PSSession -ComputerName $computerName -Credential $credentials
+    Exit-PSSession
+
+    try {
+        # Check if the HKU drive already exists
+        Get-PSDrive -PSProvider Registry -Name HKU | Out-Null
+        $canCheckRegistry = $true
+    }
+    catch [System.Management.Automation.DriveNotFoundException] {
+        try {
+            # Create the HKU drive
+            New-PSDrive -PSProvider Registry -Name HKU -Root HKEY_USERS | Out-Null
+            $canCheckRegistry = $true
+        }
+        catch {
+            # Ignore the failure to create the drive and go ahead with trying to set the agent up
+            Write-Warning "Moving ahead with agent setup as the script failed to create HKU drive necessary for checking if the registry entry for the user's SId exists.\n$_"
+        }
+    }
+
+    # 120 seconds timeout
+    $timeout = 120
+
+    # Check if the registry key required for enabling autologon is present on the machine, if not wait for 120 seconds in case the user profile is still getting created
+    while ($timeout -ge 0 -and $canCheckRegistry) {
+        $objUser = New-Object System.Security.Principal.NTAccount($Config.WindowsLogonAccount)
+        $securityId = $objUser.Translate([System.Security.Principal.SecurityIdentifier])
+        $securityId = $securityId.Value
+
+        if (Test-Path "HKU:\\$securityId") {
+            if (!(Test-Path "HKU:\\$securityId\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run")) {
+                New-Item -Path "HKU:\\$securityId\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run" -Force
+                Write-Host "Created the registry entry path required to enable autologon."
+            }
+        
+            break
+        }
+        else {
+            $timeout -= 10
+            Start-Sleep(10)
+        }
+    }
+
+    if ($timeout -lt 0) {
+        Write-Warning "Failed to find the registry entry for the SId of the user, this is required to enable autologon. Trying to start the agent anyway."
+    }
+}
+
+function Install-Agent {
+    param(
+        $Config
+    )
+
+    try {
+        # Set the current directory to the agent dedicated one previously created.
+        Push-Location -Path $Config.AgentInstallPath
+
+        
+
+        if ($Config.RunAsAutoLogon) {
+            Prep-MachineForAutologon -Config $Config
+
+            # Arguements to run agent with autologon enabled
+            $agentConfigArgs = "--unattended", "--url", $Config.ServerUrl, "--auth", "PAT", "--token", $Config.VstsUserPassword, "--pool", $Config.PoolName, "--agent", $Config.AgentName, "--runAsAutoLogon", "--overwriteAutoLogon", "--windowslogonaccount", $Config.WindowsLogonAccount
+        }
+        if (-not [string]::IsNullOrWhiteSpace($Config.WindowsLogonAccount)) {
+            $agentConfigArgs = "--unattended", "--url", $Config.ServerUrl, "--auth", "PAT", "--token", $Config.VstsUserPassword, "--pool", $Config.PoolName, "--agent", $Config.AgentName, "--runasservice", "--windowslogonaccount", $Config.WindowsLogonAccount
+
+            if (-not [string]::IsNullOrWhiteSpace($Config.WindowsLogonPassword)) {
+                $agentConfigArgs += "--windowslogonpassword", $Config.WindowsLogonPassword
+            }
+        }
+        else {
+            # Arguements to run agent as a service
+            $agentConfigArgs = "--unattended", "--url", $Config.ServerUrl, "--auth", "PAT", "--token", $Config.VstsUserPassword, "--pool", $Config.PoolName, "--agent", $Config.AgentName, "--runasservice"
+        }
+        
+        # if ($Config.ReplaceAgent) {
+        #     Write-Host "Removing agent"
+        #     & $Config.AgentExePath $agentConfigArgs
+        # }
+        & $Config.AgentExePath $agentConfigArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Agent configuration failed for agent $($Config.AgentName) with exit code: $LASTEXITCODE"
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Remove-Agent {
+    param(
+        $Config
+    )
+    try {
+        # Set the current directory to the agent dedicated one previously created.
+        Push-Location -Path $Config.AgentInstallPath
+
+        Write-Host "Removing agent '$($Config.AgentName)'"
+        $agentConfigArgs = "remove", "--unattended", "--auth", "PAT", "--token", $Config.VstsUserPassword
+        
+        & $Config.AgentExePath $agentConfigArgs
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+
+###################################################################################################
+#
+# Main execution block.
+#
+try {
+    # Ensure we set the working directory to that of the script.
+    Push-Location $PSScriptRoot
+
+    Write-Output "Validating parameters..."
+
+    Test-Parameters -Account $Account -PersonalAccessToken $PersonalAccessToken -PoolName $PoolName
+
+    Write-Host 'Downloading agent package'
+    $agentPackagePath = Get-AgentPackage -VstsAccount $Account -VstsUserPassword $PersonalAccessToken
+        
+    for ($i = 1; $i -lt $AgentCount + 1; $i++) {
+
+        $updatedAgentName = ($AgentName + "-" + $i)
+
+        Write-Host 'Preparing agent installation location'
+        $agentInstallPath = New-AgentInstallPath -RootDirectory $AgentInstallLocation -AgentName $updatedAgentName
+
+        Write-Host "Checking for previously configured agent with name '$updatedAgentName'"
+        $agentExists = Test-AgentExists -InstallPath $agentInstallPath -AgentName $updatedAgentName
+
+        if ($agentExists) {
+            Write-Host "Getting agent installer path under '$agentInstallPath'"
+            $agentExePath = Get-AgentInstaller -InstallPath $agentInstallPath
+            
+            if (!$Overwrite) {
+                throw "Agent $updatedAgentName is already configured in this machine. Overwrite is false, so failing installation"
+            }
+            else {
+                # if the agent is already running, you cannot just extract the zip. First uninstall and then copy.
+                $config = @{
+                    AgentName        = $updatedAgentName
+                    AgentExePath     = $agentExePath
+                    VstsUserPassword = $PersonalAccessToken
+                }
+                Remove-Agent -Config $config
+            }
+        }
+        Write-Host "Extracting agent package contents to '$agentInstallPath'"
+        Extract-AgentPackage -PackagePath $agentPackagePath -Destination $agentInstallPath
+
+        Write-Host "Getting agent installer path under '$agentInstallPath'"
+        $agentExePath = Get-AgentInstaller -InstallPath $agentInstallPath
+
+        
+        # Call the agent with the configure command and all the options (this creates the settings file)
+        # without prompting the user or blocking the cmd execution.
+        Write-Host "Installing agent $updatedAgentName under $agentInstallPath"
+        $config = @{
+            AgentExePath         = $agentExePath
+            AgentInstallPath     = $agentInstallPath
+            AgentName            = $updatedAgentName
+            PoolName             = $poolName
+            ReplaceAgent         = $Overwrite
+            ServerUrl            = "https://$Account.visualstudio.com"
+            VstsUserPassword     = $PersonalAccessToken
+            WindowsLogonAccount  = $WindowsLogonAccount
+            WindowsLogonPassword = $WindowsLogonPassword
+            RunAsAutoLogon       = $runAsAutoLogon
+        }
+        Install-Agent -Config $config
+
+    }
+    Write-Host "`nThe artifact was applied successfully.`n"
 }
 finally {
     Pop-Location

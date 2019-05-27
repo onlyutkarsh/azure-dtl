@@ -59,9 +59,28 @@
             "displayName": "Overwrite if agent with same name exists",
             "defaultValue": "true",
             "description": "If the folder with the agent name already exists, and this is true, the agent will be overwritten, otherwise installation will fail."
+        },
+        "RunAsAutoLogon": {
+            "type": "bool",
+            "displayName": "Enable Autologon",
+            "description": "Enable autologon to run the agent in interactive mode that can sustain machine reboots.<br>Set this to true if the agents will be used to run UI tests.",
+            "defaultValue": false
+        },
+        "WindowsLogonAccount": {
+            "type": "string",
+            "displayName": "Account Name",
+            "description": "The Windows logon account which will run the agent.<br>When autologon is enabled, agent runs as a process in the context of the specified user.",
+            "defaultValue": "NT AUTHORITY\\NetworkService"
+        },
+        "WindowsLogonPassword": {
+            "type": "securestring",
+            "displayName": "Account Password",
+            "description": "The Windows logon account password which will run the agent. This is not required for the default NT AUTHORITY\\NetworkService account when running as a service.",
+            "defaultValue": "",
+            "allowEmpty": true
         }
     },
     "runCommand": {
-        "commandToExecute": "[concat('powershell.exe -ExecutionPolicy bypass \"& ./run.ps1',' -Account ', parameters('Account'),' -Overwrite $', parameters('Overwrite'), ' -PersonalAccessToken ', parameters('PersonalAccessToken'), '-AgentInstallLocation ''', parameters('AgentInstallLocation'), ''' -AgentName ''', parameters('AgentName'), ''' -AgentNamePrefix ''', parameters('AgentNamePrefix'), ''' -PoolName ''', parameters('PoolName'), ''' -AgentCount ''', parameters('AgentCount'), '''\"')]"
+        "commandToExecute": "[concat('powershell.exe -ExecutionPolicy bypass \"& ./run.ps1',' -Account ''', parameters('Account'),''' -Overwrite $', parameters('Overwrite'), ' -PersonalAccessToken ''', parameters('PersonalAccessToken'), '''-AgentInstallLocation ''', parameters('AgentInstallLocation'), ''' -AgentName ''', parameters('AgentName'), ''' -runAsAutoLogon $', parameters('runAsAutoLogon') , ' -windowsLogonAccount ''', parameters('windowsLogonAccount'), ''' -windowsLogonPassword ''', parameters('windowsLogonPassword'), ''' -PoolName ''', parameters('PoolName'), ''' -AgentCount ', parameters('AgentCount'), '\"')]"
     }
 }
