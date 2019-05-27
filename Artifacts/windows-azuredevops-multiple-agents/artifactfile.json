@@ -27,15 +27,9 @@
         "AgentName": {
             "type": "string",
             "displayName": "Agent Name",
-            "description": "The name to give to the agent, as seen by Azure DevOps. If empty, the computer name will be used.",
+            "description": "The name to give to the agent, as seen by Azure DevOps. If empty, the computer name will be used. Number suffix is applied based on AgentCount below.",
             "allowEmpty": true,
             "defaultValue": ""
-        },
-        "AgentNamePrefix": {
-            "type": "string",
-            "displayName": "Agent Name Prefix",
-            "description": "Prefixes every agent with string specified here.",
-            "defaultValue": "dtl"
         },
         "AgentInstallLocation": {
             "type": "string",
